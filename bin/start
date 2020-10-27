@@ -1,0 +1,25 @@
+#!/bin/bash -ex
+
+function finish() {
+  docker-compose down -v
+}
+
+function configure_master {
+  local source=$1
+  docker-compose exec $source bash -c "
+    evoke configure master \
+     --accept-eula \
+     --hostname $source \
+     --admin-password MySecretP@ss1 \
+     demo
+  "
+}
+
+trap finish EXIT
+
+docker-compose up --detach --no-deps dap-source dap-destination
+
+configure_master dap-source
+configure_master dap-destination
+
+docker-compose run --rm follower-syncer /bin/ash
