@@ -1,4 +1,4 @@
-#!/bin/bash -ex
+#!/bin/bash -e
 
 function finish() {
   docker-compose down -v
@@ -16,6 +16,8 @@ function configure_master {
 }
 
 trap finish EXIT
+
+docker-compose build
 
 docker-compose up --detach --no-deps dap-source dap-destination
 
