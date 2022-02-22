@@ -6,9 +6,9 @@ services:
       - ./:/src/follower-syncer
       - source-certs:/opt/source/conjur/etc/ssl
       - destination-certs:/opt/destination/conjur/etc/ssl
-    
+
   dap-source:
-    image: registry2.itci.conjur.net/conjur-appliance:11.7.0
+    image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
     container_name: dap-source
     ports:
       - "443:443"
@@ -16,11 +16,11 @@ services:
       - "443"
     security_opt:
         - "seccomp:unconfined"
-    volumes: 
+    volumes:
       - source-certs:/opt/conjur/etc/ssl
-    
+
   dap-destination:
-    image: registry2.itci.conjur.net/conjur-appliance:11.7.0
+    image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
     container_name: dap-destination
     ports:
       - "444:443"
@@ -28,9 +28,9 @@ services:
       - "443"
     security_opt:
       - "seccomp:unconfined"
-    volumes: 
+    volumes:
       - destination-certs:/opt/conjur/etc/ssl
-      
+
 volumes:
   source-certs:
   destination-certs:
