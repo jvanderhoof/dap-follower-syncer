@@ -1,7 +1,7 @@
 FROM ruby:2.6-alpine
 
 RUN apk update
-RUN apk update && apk add --virtual build-dependencies build-base git openssl
+RUN apk update && apk add --virtual build-dependencies build-base git openssl postgresql-dev
 RUN rm -rf /var/cache/apk/*
 
 RUN mkdir -p /src/follower-syncer

@@ -1,0 +1,11 @@
+@startuml
+agent "Conjur Leader" as conjur_leader
+agent "Conjur Follower" as conjur_follower
+database "Leader Postgres" as pg_leader
+database "Follower Postgres" as pg_follower
+
+conjur_leader -- pg_leader : Reads from/Writes to
+conjur_follower -- pg_follower : Reads from/Writes to
+
+pg_leader - pg_follower : Replicates data from\n(except for Variable data)
+@enduml

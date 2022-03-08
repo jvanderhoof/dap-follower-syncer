@@ -1,0 +1,9 @@
+#!/bin/bash -e
+
+function finish() {
+  docker-compose down -v
+  rm admin_data
+  rm data_key
+}
+
+finish

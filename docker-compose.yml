@@ -1,35 +1,128 @@
 version: "3"
 services:
-  follower-syncer:
+  pg-leader:
+    image: postgres:10.16
+    environment:
+      POSTGRES_PASSWORD: Password123
+      # To avoid the following error:
+      #
+      #   Error: Database is uninitialized and superuser password is not
+      #   specified.  You must specify POSTGRES_PASSWORD for the superuser. Use
+      #   "-e POSTGRES_PASSWORD=password" to set it in "docker run".
+      #
+      #   You may also use POSTGRES_HOST_AUTH_METHOD=trust to allow all
+      #   connections without a password. This is *not* recommended. See
+      #   PostgreSQL documentation about "trust"
+      # POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./postgres/leader/postgres.conf:/etc/postgresql/postgresql.conf
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - 5432:5432
+  pg-follower-1:
+    image: postgres:10.16
+    environment:
+      POSTGRES_PASSWORD: Password123
+      # To avoid the following error:
+      #
+      #   Error: Database is uninitialized and superuser password is not
+      #   specified.  You must specify POSTGRES_PASSWORD for the superuser. Use
+      #   "-e POSTGRES_PASSWORD=password" to set it in "docker run".
+      #
+      #   You may also use POSTGRES_HOST_AUTH_METHOD=trust to allow all
+      #   connections without a password. This is *not* recommended. See
+      #   PostgreSQL documentation about "trust"
+      # POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./postgres/follower/postgres.conf:/etc/postgresql/postgresql.conf
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - 5433:5432
+    links:
+      - pg-leader
+
+  conjur-leader:
+    image: cyberark/conjur:latest
+    # container_name: conjur_server
+    command: server
+    environment:
+      DATABASE_URL: postgres://postgres:Password123@pg-leader/postgres
+      CONJUR_DATA_KEY:
+      CONJUR_AUTHENTICATORS:
+      CONJUR_LOG_LEVEL: debug
+    depends_on:
+      - pg-leader
+    links:
+      - pg-leader
+    restart: on-failure
+    ports:
+      - 8080:80
+
+  conjur-follower-1:
+    image: cyberark/conjur:latest
+    # container_name: conjur_server
+    command: server
+    environment:
+      DATABASE_URL: postgres://postgres:Password123@pg-follower-1/postgres
+      CONJUR_DATA_KEY:
+      CONJUR_AUTHENTICATORS:
+    depends_on:
+      - pg-follower-1
+    links:
+      - pg-follower-1
+    restart: on-failure
+    ports:
+      - 8081:80
+
+  dev-container:
     build: .
+    links:
+      - conjur-leader
+      - conjur-follower-1
+      - pg-leader
+      - pg-follower-1
     volumes:
       - ./:/src/follower-syncer
-      - source-certs:/opt/source/conjur/etc/ssl
-      - destination-certs:/opt/destination/conjur/etc/ssl
+      # - source-certs:/opt/source/conjur/etc/ssl
+      # - destination-certs:/opt/destination/conjur/etc/ssl
 
-  dap-source:
-    image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
-    container_name: dap-source
-    ports:
-      - "443:443"
-    expose:
-      - "443"
-    security_opt:
-        - "seccomp:unconfined"
+  client:
+    image: cyberark/conjur-cli:5
+    entrypoint: sleep
+    command: infinity
+    environment:
+      CONJUR_APPLIANCE_URL: http://conjur-leader
+      CONJUR_ACCOUNT: default
+      CONJUR_AUTHN_LOGIN: admin
+    links:
+    - conjur-leader:conjur-leader
     volumes:
-      - source-certs:/opt/conjur/etc/ssl
+    - .:/src/
 
-  dap-destination:
-    image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
-    container_name: dap-destination
-    ports:
-      - "444:443"
-    expose:
-      - "443"
-    security_opt:
-      - "seccomp:unconfined"
-    volumes:
-      - destination-certs:/opt/conjur/etc/ssl
+
+  # dap-source:
+  #   image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
+  #   container_name: dap-source
+  #   ports:
+  #     - "443:443"
+  #   expose:
+  #     - "443"
+  #   security_opt:
+  #       - "seccomp:unconfined"
+  #   volumes:
+  #     - source-certs:/opt/conjur/etc/ssl
+
+  # dap-destination:
+  #   image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
+  #   container_name: dap-destination
+  #   ports:
+  #     - "444:443"
+  #   expose:
+  #     - "443"
+  #   security_opt:
+  #     - "seccomp:unconfined"
+  #   volumes:
+  #     - destination-certs:/opt/conjur/etc/ssl
 
 volumes:
   source-certs:

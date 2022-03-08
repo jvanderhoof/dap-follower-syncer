@@ -1,7 +1,9 @@
-#!/bin/bash -e
+#!/bin/bash -ex
 
 function finish() {
   docker-compose down -v
+  rm admin_data
+  rm data_key
 }
 
 function configure_master {
@@ -19,9 +21,31 @@ trap finish EXIT
 
 docker-compose build
 
-docker-compose up --detach --no-deps dap-source dap-destination
+# docker-compose up --detach --no-deps dap-source dap-destination
 
-configure_master dap-source
-configure_master dap-destination
+# configure_master dap-source
+# configure_master dap-destination
 
-docker-compose run --rm follower-syncer /bin/ash
+# docker-compose run --rm follower-syncer /bin/ash
+
+if [ ! -f data_key ]; then
+  docker-compose run --no-deps --rm conjur-leader data-key generate > data_key
+fi
+export CONJUR_DATA_KEY="$(< data_key)"
+
+docker-compose up -d --no-deps \
+  conjur-leader \
+  pg-leader \
+  conjur-follower-1 \
+  pg-follower-1 \
+  client
+
+# docker-compose up --no-deps conjur pg-leader
+
+docker-compose exec -T conjur-leader conjurctl wait
+
+if [ ! -f admin_data ]; then
+  docker-compose exec conjur-leader conjurctl account create default > admin_data
+fi
+
+docker-compose run --rm dev-container /bin/ash
