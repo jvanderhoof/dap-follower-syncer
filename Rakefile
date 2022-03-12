@@ -1,106 +1,41 @@
-require 'json'
-require 'yaml'
 require 'securerandom'
 
 require 'rubygems'
 require 'bundler/setup'
 require 'conjur/api'
 
-# require 'pg'
 require 'sequel'
 require 'pry'
 
-ADMIN_API_KEY = '1vjncas3ef0amx2gsddxm7wd9sz7jbqct1j0zzh12nk81dn37w7pfq'.freeze
-FOLLOWER_API_KEY = '39xe8hs3h847a72yyadnq14v6fq3rgj2ks22qe45t15fvvkd1rxxevc'.freeze
+ADMIN_API_KEY = '2bhmwyd374mrp62xdr9xs2p99xnn3td9fff1kbzm3bbeewwh27zkgg2'.freeze
 ACCOUNT = 'default'.freeze
-
-module Replication
-  class VariableReader
-    def initialize(client:)
-      @client = client
-    end
-
-    # Returns a hash where the variable is the key and the corresponding
-    # value is the variable value.
-    #
-    # IMPORTANT: we need to gather ALL the information from the leader
-    # before connecting to the follower as the the Conjur API gem uses
-    # a Singleton for setting connection information.
-    def read(variables: [])
-      if variables.is_a?(Array)
-        variables.map do |variable|
-          @client.resource(variable)
-        end
-      else
-        @client.resources(kind: 'variable')
-      end.each_with_object({}) do |variable, hsh|
-        hsh[variable.id.to_s] = variable.value
-      end
-    end
-  end
-
-  class VariableWriter
-    def initialize(client:)
-      @client = client
-    end
-
-    def write(variables:)
-      variables.each do |variable, value|
-        puts "updating '#{variable}' to '#{value}'"
-        @client.resource(variable).add_value(value)
-      end
-    end
-  end
-end
 
 namespace :partial_replication do
   task :setup do
-    LEADER = Sequel.connect('postgres://postgres:Password123@pg-leader/postgres')
-    LEADER.execute('show WAL_LEVEL;') do |result|
-      raise 'Leader must be configured with Logical Replication' if result.first['wal_level'] != 'logical'
+    # Setup Leader
+    Sequel.connect('postgres://postgres:Password123@pg-leader/postgres') do |db|
+      db.run('CREATE EXTENSION pglogical')
+      db.run("SELECT pglogical.create_node(node_name := 'provider1', dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'annotations')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'authenticator_configs')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'credentials')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'host_factory_tokens')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'permissions')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'policy_versions')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'role_memberships')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'roles')")
+      db.run("SELECT pglogical.replication_set_add_table('default', 'slosilo_keystore')")
+      db.run("SELECT pglogical.create_replication_set('follower-1')")
+      db.run("SELECT pglogical.replication_set_add_table(set_name:= 'follower-1', relation := 'resources', row_filter:= 'resource_id ~* '':group:|:host:|:policy:|:webservice:|:layer:|:user:'' or is_resource_visible(resource_id, ''default:host:conjur/members/followers/partial-follower-1'')')")
+      db.run("SELECT pglogical.replication_set_add_table(set_name:= 'follower-1', relation := 'secrets', row_filter:= 'is_resource_visible(resource_id, ''default:host:conjur/members/followers/partial-follower-1'')')")
     end
-    LEADER.execute('CREATE PUBLICATION partial_replica_publication FOR TABLE annotations,authenticator_configs,credentials,host_factory_tokens,permissions,policy_log,policy_versions,resources,resources_textsearch,role_memberships,roles,slosilo_keystore;')
 
-    FOLLOWER = Sequel.connect('postgres://postgres:Password123@pg-follower-1/postgres')
-    FOLLOWER.execute("CREATE SUBSCRIPTION partial_replica_subscription CONNECTION 'host=pg-leader port=5432 dbname=postgres password=Password123' PUBLICATION partial_replica_publication;")
-  end
-
-  task :notify do
-    LEADER = Sequel.connect('postgres://postgres:Password123@pg-leader/postgres')
-    LEADER.notify(:variable_changes, payload:
-      {
-        variable: 'default:variable:production/my-app-2/postgres-database/username',
-        action: 'updated'
-      }.to_json
-    )
-  end
-
-  task :listen do
-    LEADER = Sequel.connect('postgres://postgres:Password123@pg-leader/postgres')
-    LEADER.listen(:variable_changes, loop: true) do |channel, pid, payload|
-      puts "Recieved payload '#{payload}' on channel '#{channel}'"
-      payload = JSON.parse(payload)
-      replicate(variables: [payload['variable']])
+    # Setup Follower
+    Sequel.connect('postgres://postgres:Password123@pg-follower-1/postgres') do |db|
+      db.run('CREATE EXTENSION pglogical')
+      db.run("SELECT pglogical.create_node( node_name := 'subscriber1', dsn := 'host=pg-follower-1 port=5432 dbname=postgres user=postgres password=Password123' )")
+      db.run("SELECT pglogical.create_subscription( subscription_name := 'subscription1', replication_sets := '{default,follower-1}', provider_dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123' )")
     end
-  end
-
-  def replicate(variables:)
-    changed_variables = Replication::VariableReader.new(
-      client: client(
-        url: 'conjur-leader',
-        host: 'host/conjur/members/followers/partial-follower-1',
-        api_key: FOLLOWER_API_KEY
-      )
-    ).read(variables: variables)
-    Replication::VariableWriter.new(
-      client: client(
-        url: 'conjur-follower-1',
-        host: 'admin',
-        api_key: ADMIN_API_KEY
-      )
-    ).write(
-      variables: changed_variables
-    )
   end
 
   def client(url:, host:, api_key:, account: ACCOUNT)
@@ -119,18 +54,6 @@ namespace :partial_replication do
     ).add_value(
       SecureRandom.hex
     )
-    LEADER = Sequel.connect('postgres://postgres:Password123@pg-leader/postgres')
-    LEADER.notify(:variable_changes, payload:
-      {
-        variable: 'default:variable:production/my-app-2/postgres-database/password',
-        action: 'updated'
-      }.to_json
-    )
-
-  end
-
-  task :replicate do
-    replicate(variables: :all)
   end
 
   task :load_data do

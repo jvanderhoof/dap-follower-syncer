@@ -2,8 +2,9 @@
 
 function finish() {
   docker-compose down -v
-  rm admin_data
-  rm data_key
+  docker network remove conjur_net || true
+  rm admin_data || true
+  rm data_key || true
 }
 
 function configure_master {
@@ -19,7 +20,14 @@ function configure_master {
 
 trap finish EXIT
 
-docker-compose build
+# docker network create conjur_net
+docker network create \
+      --driver bridge \
+      --ipam-driver default \
+      --subnet 10.16.23.0/27 \
+      conjur_net
+
+# docker-compose build
 
 # docker-compose up --detach --no-deps dap-source dap-destination
 
