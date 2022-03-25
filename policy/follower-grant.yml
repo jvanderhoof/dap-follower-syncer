@@ -1,12 +1,12 @@
 # Grant the variables for `my-app` 1-3 in production to Follower 1
 - !grant
-  member: !group conjur/members/followers/partial-follower-1/replicated-data
+  member: !group conjur/members/followers/us-east-replica-set/replicated-data
   role: !group production/my-app-1/postgres-database/secrets-users
 
 - !grant
-  member: !group conjur/members/followers/partial-follower-1/replicated-data
+  member: !group conjur/members/followers/us-east-replica-set/replicated-data
   role: !group production/my-app-2/postgres-database/secrets-users
 
 - !grant
-  member: !group conjur/members/followers/partial-follower-1/replicated-data
+  member: !group conjur/members/followers/us-east-replica-set/replicated-data
   role: !group production/my-app-3/postgres-database/secrets-users

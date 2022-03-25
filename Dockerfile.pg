@@ -1,4 +1,5 @@
-FROM postgres:10.16
+# FROM postgres:10.16
+FROM postgres:14.2
 # FROM postgres:10-bullseye
 
 RUN apt-get update
@@ -8,4 +9,5 @@ RUN apt install curl ca-certificates gnupg
 RUN curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor | tee /etc/apt/trusted.gpg.d/apt.postgresql.org.gpg >/dev/null
 RUN add-apt-repository "deb http://apt.postgresql.org/pub/repos/apt stretch-pgdg main"
 RUN apt update
-RUN apt-get install postgresql-10-pglogical
+# RUN apt-get install postgresql-10-pglogical
+RUN apt-get install postgresql-14-pglogical

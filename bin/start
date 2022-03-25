@@ -1,5 +1,9 @@
 #!/bin/bash -ex
 
+function print_help {
+  echo 'help me!!!'
+}
+
 function finish() {
   docker-compose down -v
   docker network remove conjur_net || true
@@ -20,40 +24,48 @@ function configure_master {
 
 trap finish EXIT
 
-# docker network create conjur_net
-docker network create \
-      --driver bridge \
-      --ipam-driver default \
-      --subnet 10.16.23.0/27 \
-      conjur_net
+function main {
+  # docker network create conjur_net
+  docker network create \
+        --driver bridge \
+        --ipam-driver default \
+        --subnet 10.16.23.0/27 \
+        conjur_net
 
-# docker-compose build
+  if [ ! -f data_key ]; then
+    docker-compose run --no-deps --rm conjur-leader data-key generate > data_key
+  fi
 
-# docker-compose up --detach --no-deps dap-source dap-destination
+  export CONJUR_DATA_KEY="$(< data_key)"
 
-# configure_master dap-source
-# configure_master dap-destination
+  docker-compose up -d --no-deps \
+    conjur-leader \
+    pg-leader \
+    conjur-follower-1 \
+    pg-follower-1 \
+    client
 
-# docker-compose run --rm follower-syncer /bin/ash
+  docker-compose exec -T conjur-leader conjurctl wait
 
-if [ ! -f data_key ]; then
-  docker-compose run --no-deps --rm conjur-leader data-key generate > data_key
+  if [ ! -f admin_data ]; then
+    docker-compose exec conjur-leader conjurctl account create default > admin_data
+  fi
+
+  docker-compose run --rm dev-container /bin/ash
+}
+
+BUILD=false
+
+while true ; do
+  case "$1" in
+    --build ) BUILD=true ; shift;;
+    -h | --help ) _print_help ; shift ;;
+    * ) if [ -z "$1" ]; then break; else echo "$1 is not a valid option"; exit 1; fi;;
+  esac
+done
+
+if [[ $BUILD = true ]]; then
+  docker-compose build
 fi
-export CONJUR_DATA_KEY="$(< data_key)"
 
-docker-compose up -d --no-deps \
-  conjur-leader \
-  pg-leader \
-  conjur-follower-1 \
-  pg-follower-1 \
-  client
-
-# docker-compose up --no-deps conjur pg-leader
-
-docker-compose exec -T conjur-leader conjurctl wait
-
-if [ ! -f admin_data ]; then
-  docker-compose exec conjur-leader conjurctl account create default > admin_data
-fi
-
-docker-compose run --rm dev-container /bin/ash
+main

@@ -1,0 +1,12 @@
+# Structure to be applied at startup, to create appropriate framework
+# for future operation
+
+# Clustering and Replication
+- !policy
+  id: conjur
+  body:
+  - !policy
+    id: members
+    body:
+    - !policy leaders
+    - !policy followers

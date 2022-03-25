@@ -1,14 +1,57 @@
-# Partial Replication Using Logical Replication and Notifications
+# Partial Replication Using PG Logical
 
 ## Overview
 
 ![Overview](./out/diagrams/overview/overview.png)
 
-- Replicate all data EXCEPT for Variable Values
-- Follower monitors Leader's Variables for variables it's been permitted
-- Follower replicates changed values
+- Replicate all data EXCEPT for Variables not explicitely granted to
+  a particular follower.
 
-# Steps For Enabling Logical Replication
+## Vocabulary
+
+- **Follower Replica**: A Conjur follower which contains a subset of secrets from contained in the leader.
+- **Replica Set**: A set of variables to be replicated to a particular follower.
+
+## Steps For Enabling Partial Replication
+
+In the following example, I will refer to two instances: a leader, and a follower. The steps taken on each to enable partial replication can be scaled to additonal followers (with additional replica sets).
+
+### Preperation
+
+### Postgres
+
+- Leader and Follower
+  - Update `postgres.conf` with the following changes:
+
+    ```conf
+    #
+    listen_addresses = '*' # allows listening on localhost and external network
+    wal_level = 'logical'
+    max_worker_processes = 10 # one per database needed on provider node
+    max_replication_slots = 10 # one per node needed on provider node
+    max_wal_senders = 10 # one per node needed on provider node
+    shared_preload_libraries = 'pglogical'
+    track_commit_timestamp = on
+    pglogical.conflict_resolution = 'last_update_wins'
+    ```
+
+  - Update `pg_hba.conf` with the following changes (to allow the follower
+    to connect with the leader):
+
+    ```conf
+    # PG Logical Hosts:
+    # NOTE: the machine's IP and replica's IP is required for pglogical to work
+    host    all             all             0.0.0.0/0               md5
+    ```
+
+## Resources
+
+  - [pglogical 2 docs](https://github.com/2ndQuadrant/pglogical/tree/REL2_x_STABLE/docs)
+- [EDB pglogical v3 docs](https://content-www.enterprisedb.com/docs/pglogical/latest/)
+  - [https://medium.com/@Navmed/setting-up-replication-in-postgresql-with-pglogical-8212e77ebc1b](https://medium.com/@Navmed/setting-up-replication-in-postgresql-with-pglogical-8212e77ebc1b)
+
+
+## Old
 
 1. On leader postgresql.conf file, set `wal_level = logical`
     1.A. Log onto Leader PG: `psql -h localhost -U postgres -W postgres`

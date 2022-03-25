@@ -67,6 +67,7 @@ services:
       CONJUR_DATA_KEY:
       CONJUR_AUTHENTICATORS:
       CONJUR_LOG_LEVEL: debug
+      OPENSSL_FIPS_ENABLED: 'false'
     depends_on:
       - pg-leader
     links:
@@ -86,6 +87,7 @@ services:
       DATABASE_URL: postgres://postgres:Password123@pg-follower-1/postgres
       CONJUR_DATA_KEY:
       CONJUR_AUTHENTICATORS:
+      OPENSSL_FIPS_ENABLED: 'false'
     depends_on:
       - pg-follower-1
     links:

@@ -1,0 +1,2 @@
+- !delete
+  record: !variable production/my-app-1/postgres-database/password

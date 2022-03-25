@@ -10,20 +10,3 @@
 - !policy
   id: production
   owner: !group security_ops
-
-# Structure for the Follower
-- !policy
-  id: conjur/members
-  body:
-    - !policy
-      id: followers
-      body:
-        - !policy
-          id: partial-follower-1
-          body:
-            - !host
-            - !group replicated-data
-
-            - !grant
-              role: !group replicated-data
-              member: !host

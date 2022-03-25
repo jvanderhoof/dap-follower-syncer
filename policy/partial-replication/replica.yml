@@ -1,0 +1,20 @@
+# Sample partial replica template
+# The following policy needs to be created once per replica set
+- !policy
+  id: <replica-1>
+  body:
+    - !variable replica-id
+
+    - !group replicated-data
+    - !group
+
+    - !permit
+      resource: !variable replica-id
+      privileges: [ read, execute ]
+      role: !group
+
+    # give replica-1 group the role replicated-data to allow
+    # uses to mark data as "replicatable" for this follower
+    - !grant
+      member: !group
+      role: !group replicated-data

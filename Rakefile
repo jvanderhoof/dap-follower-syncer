@@ -7,41 +7,393 @@ require 'conjur/api'
 require 'sequel'
 require 'pry'
 
-ADMIN_API_KEY = '2bhmwyd374mrp62xdr9xs2p99xnn3td9fff1kbzm3bbeewwh27zkgg2'.freeze
+ADMIN_API_KEY = '3vyrvqx25yh8pd3pfbrbq32fanvn2qc3w6v25yy6j1cnds371x29s19'.freeze
 ACCOUNT = 'default'.freeze
 
-namespace :partial_replication do
-  task :setup do
-    # Setup Leader
-    Sequel.connect('postgres://postgres:Password123@pg-leader/postgres') do |db|
-      db.run('CREATE EXTENSION pglogical')
-      db.run("SELECT pglogical.create_node(node_name := 'provider1', dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'annotations')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'authenticator_configs')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'credentials')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'host_factory_tokens')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'permissions')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'policy_versions')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'role_memberships')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'roles')")
-      db.run("SELECT pglogical.replication_set_add_table('default', 'slosilo_keystore')")
-      db.run("SELECT pglogical.create_replication_set('follower-1')")
-      db.run("SELECT pglogical.replication_set_add_table(set_name:= 'follower-1', relation := 'resources', row_filter:= 'resource_id ~* '':group:|:host:|:policy:|:webservice:|:layer:|:user:'' or is_resource_visible(resource_id, ''default:host:conjur/members/followers/partial-follower-1'')')")
-      db.run("SELECT pglogical.replication_set_add_table(set_name:= 'follower-1', relation := 'secrets', row_filter:= 'is_resource_visible(resource_id, ''default:host:conjur/members/followers/partial-follower-1'')')")
+module PolicyGenerator
+  module Templates
+    class PartialReplicaHost
+      def self.template(host:)
+        <<~TEMPLATE
+          # One or more unique hosts should exist per replica. A host is used to identify
+          # a unique follower.
+          - !host #{host}
+
+          # Add the above follower to the replica set.
+          - !grant
+            role: !group
+            member: !host #{host}
+        TEMPLATE
+      end
     end
 
-    # Setup Follower
+    class ReplicaSet
+      def self.template(replicaset_id:)
+        <<~TEMPLATE
+          # Sample partial replica template
+          # The following policy needs to be created once per replica set
+          - !policy
+            id: #{replicaset_id}
+            body:
+              - !variable replica-id
+
+              - !group replicated-data
+              - !group
+
+              - !permit
+                resource: !variable replica-id
+                privileges: [ read, execute ]
+                role: !group
+
+              # give replica-1 group the role replicated-data to allow
+              # uses to mark data as "replicatable" for this follower
+              - !grant
+                member: !group
+                role: !group replicated-data
+        TEMPLATE
+      end
+    end
+  end
+end
+
+def add_replica_set(conjur_client:, name:, hosts:[], account:)
+  replica_set = "conjur/members/followers/#{name}"
+  # Generate and load replica policy
+  conjur_client.load_policy(
+    'conjur/members/followers',
+    PolicyGenerator::Templates::ReplicaSet.template(replicaset_id: name)
+  )
+  # Add hosts to the replica set
+  hosts.each do |host|
+    conjur_client.load_policy(
+      replica_set,
+      PolicyGenerator::Templates::PartialReplicaHost.template(host: host)
+    )
+  end
+  # Generate a UUID for the replica set
+  uuid = SecureRandom.uuid
+  conjur_client.resource([
+    account,
+    'variable',
+    "#{replica_set}/replica-id"
+  ].join(':')).add_value(uuid)
+
+  # Generate the PGLogical record set
+  Sequel.connect('postgres://postgres:Password123@pg-leader/postgres') do |db|
+    db.run("SELECT pglogical.create_replication_set('#{uuid}')")
+    db.run("SELECT pglogical.replication_set_add_table(set_name:= '#{uuid}', relation := 'resources', row_filter:= 'resource_id ~* '':group:|:host:|:policy:|:webservice:|:layer:|:user:'' or is_resource_visible(resource_id, ''#{account}:group:#{replica_set}/replicated-data'')')")
+    db.run("SELECT pglogical.replication_set_add_table(set_name:= '#{uuid}', relation := 'secrets', row_filter:= 'is_resource_visible(resource_id, ''#{account}:group:#{replica_set}/replicated-data'')')")
+  end
+end
+
+def configure_partial_replica_follower(host:, conjur_client:)
+  # Generate a unique node and subscription
+  subscriber = "#{host.gsub(/\W/, '_')}_#{SecureRandom.hex(3)}"
+  subscription = "#{subscriber}_subscription"
+  puts "subscription: #{subscription}"
+
+  # Retrieve host's replica-set replica id
+  replica_set_variable = conjur_client.resources(kind: 'variable', search: 'replica-id').first
+  replica_set_name = replica_set_variable.id.to_s.split(':').last.split('/')[0..-2].join('/')
+  puts "replica_set_name: #{replica_set_name}"
+  replica_set_id = replica_set_variable.value
+  puts "replica_set_id: #{replica_set_id}"
+  # return
+
+  Sequel.connect('postgres://postgres:Password123@pg-follower-1/postgres') do |db|
+    db.run('CREATE EXTENSION IF NOT EXISTS pglogical')
+    db.run("SELECT pglogical.create_node( node_name := '#{subscriber}', dsn := 'host=pg-follower-1 port=5432 dbname=postgres user=postgres password=Password123' )")
+
+    # Create subscription for this record set
+    db.run("SELECT pglogical.create_subscription(subscription_name := '#{subscription}', replication_sets := '{default,#{replica_set_id}}', provider_dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123' )")
+    puts 'waiting for replication to complete'
+    db.run("SELECT pglogical.wait_for_subscription_sync_complete('#{subscription}')")
+    puts 'replication complete'
+
+    # Delete all the Foreign keys that exist connecting to the `resources` table so
+    # we can perform table resynchronization
+    db.run('ALTER TABLE public.secrets DROP CONSTRAINT secrets_resource_id_fkey')
+    db.run('ALTER TABLE public.roles DROP CONSTRAINT roles_policy_id_fkey')
+    db.run('ALTER TABLE public.role_memberships DROP CONSTRAINT role_memberships_policy_id_fkey')
+    db.run('ALTER TABLE public.permissions DROP CONSTRAINT permissions_policy_id_fkey')
+    db.run('ALTER TABLE public.permissions DROP CONSTRAINT permissions_resource_id_fkey')
+    db.run('ALTER TABLE public.annotations DROP CONSTRAINT annotations_resource_id_fkey')
+    db.run('ALTER TABLE public.annotations DROP CONSTRAINT annotations_policy_id_fkey')
+    db.run('ALTER TABLE public.policy_versions DROP CONSTRAINT policy_versions_resource_id_fkey')
+    db.run('ALTER TABLE public.host_factory_tokens DROP CONSTRAINT host_factory_tokens_resource_id_fkey')
+    db.run('ALTER TABLE public.resources_textsearch DROP CONSTRAINT resources_textsearch_resource_id_fkey')
+    db.run('ALTER TABLE public.authenticator_configs DROP CONSTRAINT authenticator_configs_resource_id_fkey')
+
+    # return
+    # Create triggers and function to handle permission modifications
+    db.run("CREATE OR REPLACE FUNCTION sync_secrets_resources_on_delete() RETURNS TRIGGER AS $$
+              BEGIN
+                PERFORM pglogical.alter_subscription_resynchronize_table('#{subscription}', 'secrets');
+                PERFORM pglogical.alter_subscription_resynchronize_table('#{subscription}', 'resources');
+                RETURN OLD;
+              END;
+            $$ LANGUAGE plpgsql;")
+    db.run("CREATE OR REPLACE FUNCTION sync_secrets_resources_on_insert_or_update() RETURNS TRIGGER AS $$
+              BEGIN
+                PERFORM pglogical.alter_subscription_resynchronize_table('#{subscription}', 'secrets');
+                PERFORM pglogical.alter_subscription_resynchronize_table('#{subscription}', 'resources');
+                RETURN NEW;
+              END;
+            $$ LANGUAGE plpgsql;")
+
+
+    db.run("CREATE OR REPLACE TRIGGER replicate_relevant_data_on_insert
+              AFTER INSERT ON public.role_memberships
+              FOR EACH ROW
+              WHEN (NEW.member_id like '%:group:#{replica_set_name}/replicated-data')
+              EXECUTE FUNCTION sync_secrets_resources_on_insert_or_update();")
+    db.run("ALTER TABLE public.role_memberships ENABLE REPLICA TRIGGER replicate_relevant_data_on_insert;")
+
+    db.run("CREATE OR REPLACE TRIGGER replicate_relevant_data_on_update
+              AFTER UPDATE ON public.role_memberships
+              FOR EACH ROW
+              WHEN (NEW.member_id like '%:group:#{replica_set_name}/replicated-data' OR OLD.member_id like '%:group:#{replica_set_name}/replicated-data')
+              EXECUTE FUNCTION sync_secrets_resources_on_insert_or_update();")
+    db.run("ALTER TABLE public.role_memberships ENABLE REPLICA TRIGGER replicate_relevant_data_on_update;")
+
+    db.run("CREATE OR REPLACE TRIGGER replicate_relevant_data_on_delete
+              AFTER DELETE ON public.role_memberships
+              FOR EACH ROW
+              WHEN (OLD.member_id like '%:group:#{replica_set_name}/replicated-data')
+              EXECUTE FUNCTION sync_secrets_resources_on_delete();")
+    db.run("ALTER TABLE public.role_memberships ENABLE REPLICA TRIGGER replicate_relevant_data_on_delete;")
+  end
+end
+
+def setup_leader(name: 'leader-1', host: 'pg-leader', conjur_client:)
+  # Create base policy for partial replication
+  conjur_client.load_policy('root', File.read('policy/partial-replication/base.yml'))
+  # Install & configure pglogical
+  Sequel.connect('postgres://postgres:Password123@pg-leader/postgres') do |db|
+    # Install
+    db.run('CREATE EXTENSION IF NOT EXISTS pglogical')
+
+    # Create Node
+    db.run("SELECT pglogical.create_node(node_name := '#{name}', dsn := 'host=#{host} port=5432 dbname=postgres user=postgres password=Password123')")
+
+    # Add tables to 'default' replica
+    db.run("SELECT pglogical.replication_set_add_table('default', 'annotations')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'authenticator_configs')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'credentials')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'host_factory_tokens')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'permissions')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'policy_versions')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'role_memberships')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'roles')")
+    db.run("SELECT pglogical.replication_set_add_table('default', 'slosilo_keystore')")
+  end
+end
+
+def load_data
+  leader_api = client(url: 'conjur-leader', host: 'admin', api_key: ADMIN_API_KEY)
+  puts leader_api.load_policy('root', File.read('policy/root.yml'))
+  %w(staging production).each do |environment|
+    leader_api.load_policy(environment, File.read('policy/apps/applications.yml'))
+    (1..6).each do |number|
+      leader_api.load_policy("#{environment}/my-app-#{number}",  File.read('policy/apps/generic-application.yml'))
+      leader_api.load_policy("#{environment}/my-app-#{number}",  File.read('policy/services/pg-database.yml'))
+      leader_api.load_policy("#{environment}/my-app-#{number}",  File.read('policy/pg-entitlement.yml'))
+
+      leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/password").add_value SecureRandom.hex(12)
+      leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/port").add_value "5432"
+      leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/url").add_value "#{environment}.postgres.databases.mycompany.com"
+      leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/username").add_value "#{environment}-my-app-#{number}-username"
+    end
+  end
+end
+
+def client(url: 'conjur-leader', host: 'admin', api_key: ADMIN_API_KEY, account: ACCOUNT)
+  Conjur.configuration.account = account
+  Conjur.configuration.appliance_url = "http://#{url}"
+  Conjur::API.new_from_key(host, api_key)
+end
+
+namespace :partial_replication do
+  task :demo do
+    # Configure a new "leader"
+    setup_leader(conjur_client: client)
+
+    # Load some data for replication
+    load_data
+
+    # Add two replica-sets to Conjur
+    {
+      'us-east-replica-set': [
+        'follower-1.mycompany.com',
+        'follower-2.mycompany.com'
+      ],
+      'us-west-replica-set': [
+        'follower-3.mycompany.com',
+        'follower-4.mycompany.com'
+      ]
+    }.each do |replicaset_id, hosts|
+      add_replica_set(
+        conjur_client: client,
+        name: replicaset_id,
+        hosts: hosts,
+        account: ACCOUNT
+      )
+    end
+
+    # Grant `us-east-replica-set` access to all credentials in:
+    # - production/my-app-1/postgres-database
+    # - production/my-app-2/postgres-database
+    # - production/my-app-3/postgres-database
+    client.load_policy('root', File.read('policy/follower-grant.yml'))
+
+    # Deploy a partial replication follower: `follower-1.mycompany.com`
+    configure_partial_replica_follower(
+      host: 'follower-1.mycompany.com',
+      conjur_client: client(
+        host: 'host/conjur/members/followers/us-east-replica-set/follower-1.mycompany.com',
+        api_key: client.resource("#{ACCOUNT}:host:conjur/members/followers/us-east-replica-set/follower-1.mycompany.com").rotate_api_key
+      )
+    )
+  end
+
+  # task :setup_leader do
+  #   # leader_api = client(url: 'conjur-leader', host: 'admin', api_key: ADMIN_API_KEY)
+  #   client.load_policy('root', File.read('policy/partial-replication/base.yml'))
+  #   # leader_api.load_policy('conjur/members/followers', File.read('policy/partial-replication/replica.yml'))
+  #   # puts leader_api.load_policy('conjur/members/followers', File.read('policy/partial-replication/follower.yml'))
+
+  #   # Setup Leader
+  #   Sequel.connect('postgres://postgres:Password123@pg-leader/postgres') do |db|
+  #     # install & configure pglogical
+  #     db.run('CREATE EXTENSION IF NOT EXISTS pglogical')
+  #     db.run("SELECT pglogical.create_node(node_name := 'provider1', dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123')")
+
+  #     # create default replica set
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'annotations')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'authenticator_configs')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'credentials')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'host_factory_tokens')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'permissions')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'policy_versions')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'role_memberships')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'roles')")
+  #     db.run("SELECT pglogical.replication_set_add_table('default', 'slosilo_keystore')")
+
+  #     # db.run("SELECT pglogical.drop_replication_set(set_name := 'follower-1');")
+  #     # db.run("SELECT pglogical.create_replication_set('follower-1')")
+  #     # db.run("SELECT pglogical.replication_set_add_table(set_name:= 'follower-1', relation := 'resources', row_filter:= 'resource_id ~* '':group:|:host:|:policy:|:webservice:|:layer:|:user:'' or is_resource_visible(resource_id, ''default:group:conjur/members/followers/replica-1/replicated-data'')')")
+  #     # db.run("SELECT pglogical.replication_set_add_table(set_name:= 'follower-1', relation := 'secrets', row_filter:= 'is_resource_visible(resource_id, ''default:group:conjur/members/followers/replica-1/replicated-data'')')")
+  #   end
+  # end
+
+  # task :setup_follower do
+
+  #   subscriber = 'Follower-1'
+  #   subscription = "#{subscriber}-subscription"
+
+
+  #   # Setup Follower
+  #   Sequel.connect('postgres://postgres:Password123@pg-follower-1/postgres') do |db|
+  #     # db.run("ALTER TABLE resources ADD COLUMN timestamp TIMESTAMP;")
+  #     # db.run("ALTER TABLE secrets ADD COLUMN timestamp TIMESTAMP;")
+
+
+  #     db.run('CREATE EXTENSION pglogical')
+  #     db.run("SELECT pglogical.create_node( node_name := '#{subscriber}', dsn := 'host=pg-follower-1 port=5432 dbname=postgres user=postgres password=Password123' )")
+
+  #     # Delete all the Foreign keys that exist on the `resources` table
+  #     db.run("ALTER TABLE roles DROP CONSTRAINT roles_policy_id_fkey")
+  #     db.run("ALTER TABLE role_memberships DROP CONSTRAINT role_memberships_policy_id_fkey")
+  #     db.run("ALTER TABLE permissions DROP CONSTRAINT permissions_policy_id_fkey")
+  #     db.run("ALTER TABLE permissions DROP CONSTRAINT permissions_resource_id_fkey")
+  #     db.run("ALTER TABLE annotations DROP CONSTRAINT annotations_resource_id_fkey")
+  #     db.run("ALTER TABLE annotations DROP CONSTRAINT annotations_policy_id_fkey")
+  #     db.run("ALTER TABLE policy_versions DROP CONSTRAINT policy_versions_resource_id_fkey")
+  #     db.run("ALTER TABLE host_factory_tokens DROP CONSTRAINT host_factory_tokens_resource_id_fkey")
+  #     db.run("ALTER TABLE resources_textsearch DROP CONSTRAINT resources_textsearch_resource_id_fkey")
+  #     db.run("ALTER TABLE authenticator_configs DROP CONSTRAINT authenticator_configs_resource_id_fkey")
+
+  #     # db.run("select pglogical.drop_subscription(subscription_name := 'subscription1')")
+  #     db.run("SELECT pglogical.create_subscription(subscription_name := '#{subscription}', replication_sets := '{default,follower-1}', provider_dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123' )")
+
+  #     # Create triggers and function to handle permission modifications
+  #     db.run("CREATE OR REPLACE FUNCTION sync_secrets_resources() RETURNS TRIGGER AS $$
+  #               BEGIN
+  #                 PERFORM pglogical.alter_subscription_resynchronize_table('#{subscription}', 'secrets');
+  #                 PERFORM pglogical.alter_subscription_resynchronize_table('#{subscription}', 'resources');
+  #               END;
+  #             $$ LANGUAGE plpgsql;")
+  #     db.run("CREATE OR REPLACE TRIGGER replicate_relevant_data_on_insert
+  #               AFTER INSERT ON role_memberships
+  #               FOR EACH ROW
+  #               WHEN (NEW.member_id like '%:group:conjur/members/followers/%/replicated-data')
+  #               EXECUTE FUNCTION sync_secrets_resources();")
+  #     db.run("CREATE OR REPLACE TRIGGER replicate_relevant_data_on_update
+  #               AFTER UPDATE ON role_memberships
+  #               FOR EACH ROW
+  #               WHEN (NEW.member_id like '%:group:conjur/members/followers/%/replicated-data' OR OLD.member_id like '%:group:conjur/members/followers/%/replicated-data')
+  #               EXECUTE FUNCTION sync_secrets_resources();")
+  #     db.run("CREATE OR REPLACE TRIGGER replicate_relevant_data_on_delete
+  #               AFTER DELETE ON role_memberships
+  #               FOR EACH ROW
+  #               WHEN (OLD.member_id like '%:group:conjur/members/followers/%/replicated-data')
+  #               EXECUTE FUNCTION sync_secrets_resources();")
+  #   end
+  # end
+
+  # task :touch do
+  #   Sequel.connect('postgres://postgres:Password123@pg-leader/postgres') do |db|
+  #     db.run("UPDATE resources SET timestamp = NOW() where resource_id in (select resource_id from visible_resources('default:group:conjur/members/followers/replica-1/replicated-data'));")
+  #     db.run("UPDATE secrets SET timestamp = NOW() where resource_id in (select resource_id from visible_resources('default:group:conjur/members/followers/replica-1/replicated-data'));")
+  #     # %w[resources secrets].each do |table|
+  #     #   db.run("UPDATE #{table} SET timestamp = NOW();")
+  #     # end
+  #   end
+  # end
+
+  task :reset_follower do
     Sequel.connect('postgres://postgres:Password123@pg-follower-1/postgres') do |db|
-      db.run('CREATE EXTENSION pglogical')
+      %w[annotations authenticator_configs credentials host_factory_tokens permissions policy_log policy_versions resources resources_textsearch role_memberships roles schema_migrations secrets slosilo_keystore].each do |table|
+        db.run("DELETE FROM #{table};")
+      end
+      # db.run("SELECT pglogical.create_node( node_name := 'subscriber1', dsn := 'host=pg-follower-1 port=5432 dbname=postgres user=postgres password=Password123' )")
+      exit
+      db.run("SELECT pglogical.drop_subscription('subscription1');")
+      db.run("SELECT pglogical.drop_node('subscriber1');")
       db.run("SELECT pglogical.create_node( node_name := 'subscriber1', dsn := 'host=pg-follower-1 port=5432 dbname=postgres user=postgres password=Password123' )")
-      db.run("SELECT pglogical.create_subscription( subscription_name := 'subscription1', replication_sets := '{default,follower-1}', provider_dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123' )")
+      db.run("SELECT pglogical.create_subscription(subscription_name := 'subscription1', replication_sets := '{default,follower-1}', provider_dsn := 'host=pg-leader port=5432 dbname=postgres user=postgres password=Password123' )")
     end
   end
 
-  def client(url:, host:, api_key:, account: ACCOUNT)
-    Conjur.configuration.account = account
-    Conjur.configuration.appliance_url = "http://#{url}"
-    Conjur::API.new_from_key(host, api_key)
+  task :delete do
+    client(
+      url: 'conjur-leader',
+      host: 'admin',
+      api_key: ADMIN_API_KEY
+    ).load_policy(
+      "root",
+      File.read('policy/delete.yml'),
+      method: :patch
+    )
+  end
+
+  task :deny do
+    client(
+      url: 'conjur-leader',
+      host: 'admin',
+      api_key: ADMIN_API_KEY
+    ).load_policy(
+      "root",
+      File.read('policy/deny.yml'),
+      method: :patch
+    )
+  end
+
+  task :add do
+    client.load_policy(
+      'root',
+      File.read('policy/add.yml')
+    )
   end
 
   task :update do
@@ -56,22 +408,10 @@ namespace :partial_replication do
     )
   end
 
-  task :load_data do
+  task :prepare_conjur do
     leader_api = client(url: 'conjur-leader', host: 'admin', api_key: ADMIN_API_KEY)
-    puts leader_api.load_policy('root', File.read('policy/root.yml'))
-    %w(staging production).each do |environment|
-      leader_api.load_policy(environment, File.read('policy/apps/applications.yml'))
-      (1..6).each do |number|
-        leader_api.load_policy("#{environment}/my-app-#{number}",  File.read('policy/apps/generic-application.yml'))
-        leader_api.load_policy("#{environment}/my-app-#{number}",  File.read('policy/services/pg-database.yml'))
-        leader_api.load_policy("#{environment}/my-app-#{number}",  File.read('policy/pg-entitlement.yml'))
-
-        leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/password").add_value SecureRandom.hex(12)
-        leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/port").add_value "5432"
-        leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/url").add_value "#{environment}.postgres.databases.mycompany.com"
-        leader_api.resource("#{ACCOUNT}:variable:#{environment}/my-app-#{number}/postgres-database/username").add_value "#{environment}-my-app-#{number}-username"
-      end
-    end
-    leader_api.load_policy('root', File.read('policy/follower-grant.yml'))
+    leader_api.load_policy('root', File.read('policy/partial-replication/base.yml'))
+    leader_api.load_policy('conjur/members/followers', File.read('policy/partial-replication/replica.yml'))
+    puts leader_api.load_policy('conjur/members/followers', File.read('policy/partial-replication/follower.yml'))
   end
 end

@@ -1,0 +1,8 @@
+# One ore more unique hosts should exist per replica. A host is used to identify
+# a unique follower.
+- !host follower-1.mycompany.com
+
+# Add the above follower to the replica set.
+- !grant
+  role: !group replica-1
+  member: !host follower-1.mycompany.com
