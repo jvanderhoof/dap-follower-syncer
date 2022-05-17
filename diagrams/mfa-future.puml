@@ -1,0 +1,121 @@
+@startuml
+actor "Alice (user)" as user
+actor "Bob (Conjur Administrator)" as admin
+participant "Conjur UI" as ui
+participant Conjur as conjur
+participant Okta as okta
+
+group Authenticator Setup
+  activate ui #DarkSalmon
+  admin <-> ui : Authenticates to Conjur UI
+  admin <-> ui : Navigate to Authenticator Configuration
+  admin <-> ui : Creates a new OIDC Authenticator
+  ui -> conjur : Sets OIDC authenticator variables:\n - provider_uri\n - client_id\n - client_secret\n - claim_mapping\n - audience\n - state\n - nonce
+  ' note right: "nonce and state are random number"
+  ui -> conjur : Updates Conjur Config file,\nenabling Okta OIDC authenticator
+  conjur -> conjur : Enables authenticator
+  conjur -> ui : Returns new Authenticator
+  ui -> ui : Displays newly created authenticator
+  deactivate ui
+end
+
+group User Import
+  admin -> conjur : Okta users loaded into Conjur as Conjur Users\n
+  admin -> conjur : Users granted permission to authenticate\nusing relevant OIDC provider.
+end
+
+user -> ui : Attempts to access Conjur UI
+ui -> ui : Redirected to UI Login page
+
+group Login Page
+  ui -> conjur : UI authenticates using Authn-Local socket
+  conjur -> ui : Returns a Conjur Auth Token
+  ui -> conjur : Requests available, enabled OIDC services
+  note right : GET /authn-oidc/<account>/providers
+  conjur -> ui : Returns list of OIDC redirect information
+  note right
+    [
+      {
+        "service_id": "<authenticator service id>",
+        "provider_uri": "OIDC Provider URI with relevant args"
+      }
+    ]
+    Note: the provider_uri does not include the Conjur UI's
+    redirect. This must be added by the UI during button
+    creation.
+  end note
+  ui -> ui : Renders Login page with list of OIDC login links
+  note left
+  UI should create redirect URL in the following form:
+
+  https://<ui url>/authn-oidc/<service_id>/callback
+
+  As the UI has only a single account, account is not needed
+  in the above redirect. To support multiple OIDC authentication
+  mechanisms, the UI needs to keep the Conjur authenticator
+  service_id.
+  end note
+end
+
+group Authentication
+  user -> okta : Click's Okta authentication button\n and redirected to Okta login
+  okta -> okta : Enters username/password
+  okta -> okta : Completes MFA
+  okta -> ui : returns OIDC code and state
+  ui -> conjur : Passes OIDC code to\nOIDC Authenticator
+  note right
+  POST /authn-oidc/<service_id>/<account>/authenticate
+
+  {
+    "code": "<OIDC Code>",
+    "state": "<state returned from redirect>"
+  }
+  end note
+  conjur -> okta : Passes code to
+  okta -> okta : Validates code validity
+  okta -> conjur : Returns Bearer Token
+  conjur -> conjur : Extracts JWT from Bearer Token
+  conjur <-> okta : Request JSON Web Key Set (JWKS)
+  conjur -> conjur : Verify JWT signed by valid\nJWKS public key
+  conjur -> conjur : Verify JWT Issuer
+  conjur -> conjur : Verify JWT Audience
+  conjur -> conjur : Verify JWT has not expired
+  activate conjur #DarkSalmon
+  conjur -> okta : Request Refresh Token
+  okta -> conjur : Return Refresh Token
+  deactivate conjur
+  conjur -> conjur : Lookup Conjur resource\nbased on JWT Claims
+  activate conjur #DarkSalmon
+  conjur -> ui : Return Conjur Auth Token\nand OIDC Refresh Token
+  note right
+  {
+    "authentication_token": "<auth-token>",
+    "refresh_token": "<refresh-token>"
+  }
+  end note
+  ui -> ui : Conjur Auth Token and Refresh Token\nsaved to session variables
+  deactivate conjur
+end
+
+ui -> ui : User redirected to Dashboard
+ui -> conjur : Data for page requested\nusing Conjur Auth Token
+ui -> ui : Conjur Auth Token Expires
+activate ui #DarkSalmon
+ui -> conjur : Refresh token provided
+note right
+POST /authn-oidc/<service_id>/<account>/authenticate
+
+{
+  "refresh_token": "<refresh_token>"
+}
+end note
+group Reauthorization
+  conjur -> okta : Passes refresh token
+  okta -> okta : Validate refresh token
+  okta -> conjur : Returns Bearer Token
+end
+conjur -> conjur : Validate JWT validity
+conjur <-> okta : Request Refresh Token
+deactivate ui
+conjur -> ui : Return Conjur Auth Token and Refresh Token
+@enduml

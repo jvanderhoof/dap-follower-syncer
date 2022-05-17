@@ -1,0 +1,8 @@
+  dev-container:
+    build: .
+    # links:
+    #   - conjur-leader
+    #   - pg-leader
+    #   - pg-follower
+    volumes:
+      - ./:/src/follower-syncer

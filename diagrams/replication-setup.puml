@@ -1,0 +1,26 @@
+@startuml
+|Leader (User Facing)|
+:Configure Leader;
+|Leader (Background)|
+:Current Setup;
+:[NEW] Apply base policy;
+:[NEW] Configure pglogical extension;
+:[NEW] Add tables to "default" replica set;
+|Leader (User Facing)|
+:Run:
+  `evoke seed partial-replica --host conjur-follower.mycompany.local --replica-set aws-east-1`;
+|Leader (Background)|
+:[NEW] Generate and commit replica set policy
+(conjur/members/followers/aws-east-1);
+:[NEW] Generate follower host
+(conjur/members/followers/conjur-follower.mycompany.local)
+and enroll into replica set;
+:[NEW] Generate random value and populate replica set's "replica-id";
+:[NEW] Create pglogical replica set with "replica-id" value;
+:[NEW] Add follower host & API to Seedfile;
+|Follower (User Facing)|
+:Configure with Seed (without setting up streaming replication);
+|Follower (Background)|
+:[NEW] Authenticate with Leader and retrieve follower's replica-id;
+:[NEW] Subscribe to Leader's "default" and replica set defined in "replica-id";
+@enduml

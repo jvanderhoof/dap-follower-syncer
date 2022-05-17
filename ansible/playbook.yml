@@ -1,0 +1,45 @@
+# vars:
+#   conjur_image: cyberark/conjur:1.17
+#   # postgres_image:
+
+- name: Pull Images
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    - name: Pull Conjur Image
+      community.docker.docker_image:
+        name: cyberark/conjur:1.17
+        source: pull
+
+    - name: Build Postgres image
+      community.docker.docker_image:
+        name: pg_logical_postgres
+        build:
+          path: ./postgres/
+          dockerfile: Dockerfile.pg
+        source: build
+
+    - name: Launch Leader Postgres
+      community.docker.docker_container:
+        name: pg-leader
+        image: pg_logical_postgres
+        env:
+          POSTGRES_PASSWORD: Password123
+        volumes:
+          - ./ansible/postgres/leader/postgres.conf:/etc/postgresql/postgresql.conf
+        command: postgres -c config_file=/etc/postgresql/postgresql.conf
+        ports:
+          - 5432:5432
+
+    - name: Create a Conjur Leader
+      community.docker.docker_container:
+        name: conjur-leader
+        image: cyberark/conjur:1.17
+        links:
+          - pg-leader
+        env:
+          DATABASE_URL: postgres://postgres:Password123@pg-leader/postgres
+          CONJUR_DATA_KEY: R0Myao5Y3hOwBfATl3gf9HTS2aT14XSlau/ADZd62Dk=
+          CONJUR_LOG_LEVEL: debug
+          OPENSSL_FIPS_ENABLED: 'false'

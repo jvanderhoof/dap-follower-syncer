@@ -1,0 +1,174 @@
+version: "3"
+services:
+  # ansible:
+  #   build:
+  #     context: ./ansible
+  #   working_dir: /src
+  #   # entrypoint: sleep
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - ./:/src
+  #     - ./ansible/ansible.cfg:/etc/ansible/ansible.cfg
+
+
+
+  pg-leader:
+    build:
+      context: ./
+      dockerfile: 'Dockerfile.pg'
+    # image: postgres:10.16
+    # networks:
+    #   conjur_net:
+    #     ipv4_address: 10.16.23.10
+    environment:
+      POSTGRES_PASSWORD: Password123
+      # To avoid the following error:
+      #
+      #   Error: Database is uninitialized and superuser password is not
+      #   specified.  You must specify POSTGRES_PASSWORD for the superuser. Use
+      #   "-e POSTGRES_PASSWORD=password" to set it in "docker run".
+      #
+      #   You may also use POSTGRES_HOST_AUTH_METHOD=trust to allow all
+      #   connections without a password. This is *not* recommended. See
+      #   PostgreSQL documentation about "trust"
+      # POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./postgres/leader/postgres.conf:/etc/postgresql/postgresql.conf
+      - ./postgres/leader/pg_hba.conf:/etc/postgresql/pg_hba.conf
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - 5432:5432
+  pg-follower:
+    build:
+      context: ./
+      dockerfile: 'Dockerfile.pg'
+    # image: postgres:10.16
+    # networks:
+    #   conjur_net:
+    #     ipv4_address: 10.16.23.2
+    deploy:
+      mode: replicated
+      replicas: 1
+
+    environment:
+      POSTGRES_PASSWORD: Password123
+      # To avoid the following error:
+      #
+      #   Error: Database is uninitialized and superuser password is not
+      #   specified.  You must specify POSTGRES_PASSWORD for the superuser. Use
+      #   "-e POSTGRES_PASSWORD=password" to set it in "docker run".
+      #
+      #   You may also use POSTGRES_HOST_AUTH_METHOD=trust to allow all
+      #   connections without a password. This is *not* recommended. See
+      #   PostgreSQL documentation about "trust"
+      # POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./postgres/follower/postgres.conf:/etc/postgresql/postgresql.conf
+      - ./postgres/follower/pg_hba.conf:/etc/postgresql/pg_hba.conf
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - "9000-9300:5432"
+    links:
+      - pg-leader
+
+  conjur-leader:
+    image: cyberark/conjur:latest
+    # container_name: conjur_server
+    command: server
+    # networks:
+    #   conjur_net:
+    #     ipv4_address: 10.16.23.3
+    environment:
+      DATABASE_URL: postgres://postgres:Password123@pg-leader/postgres
+      CONJUR_DATA_KEY:
+      CONJUR_AUTHENTICATORS:
+      CONJUR_LOG_LEVEL: debug
+      OPENSSL_FIPS_ENABLED: 'false'
+    depends_on:
+      - pg-leader
+    links:
+      - pg-leader
+    restart: on-failure
+    ports:
+      - 8080:80
+
+  # conjur-follower-1:
+  #   image: cyberark/conjur:latest
+  #   # container_name: conjur_server
+  #   command: server
+  #   # networks:
+  #   #   conjur_net:
+  #   #     ipv4_address: 10.16.23.4
+  #   environment:
+  #     DATABASE_URL: postgres://postgres:Password123@pg-follower/postgres
+  #     CONJUR_DATA_KEY:
+  #     CONJUR_AUTHENTICATORS:
+  #     OPENSSL_FIPS_ENABLED: 'false'
+  #   depends_on:
+  #     - pg-follower
+  #   links:
+  #     - pg-follower
+  #   restart: on-failure
+  #   ports:
+  #     - 8081:80
+
+  dev-container:
+    build: .
+    # networks:
+    #   conjur_net:
+    #     ipv4_address: 10.16.23.20
+    links:
+      - conjur-leader
+      # - conjur-follower-1
+      - pg-leader
+      - pg-follower
+    volumes:
+      - ./:/src/follower-syncer
+      # - source-certs:/opt/source/conjur/etc/ssl
+      # - destination-certs:/opt/destination/conjur/etc/ssl
+
+  client:
+    image: cyberark/conjur-cli:5
+    entrypoint: sleep
+    command: infinity
+    environment:
+      CONJUR_APPLIANCE_URL: http://conjur-leader
+      CONJUR_ACCOUNT: default
+      CONJUR_AUTHN_LOGIN: admin
+    links:
+    - conjur-leader:conjur-leader
+    volumes:
+    - .:/src/
+
+
+  # dap-source:
+  #   image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
+  #   container_name: dap-source
+  #   ports:
+  #     - "443:443"
+  #   expose:
+  #     - "443"
+  #   security_opt:
+  #       - "seccomp:unconfined"
+  #   volumes:
+  #     - source-certs:/opt/conjur/etc/ssl
+
+  # dap-destination:
+  #   image: registry2.itci.conjur.net/conjur-appliance:${VERSION}
+  #   container_name: dap-destination
+  #   ports:
+  #     - "444:443"
+  #   expose:
+  #     - "443"
+  #   security_opt:
+  #     - "seccomp:unconfined"
+  #   volumes:
+  #     - destination-certs:/opt/conjur/etc/ssl
+
+volumes:
+  source-certs:
+  destination-certs:
+
+# networks:
+#   conjur_net:
+#     external: true

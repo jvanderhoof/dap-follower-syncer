@@ -1,36 +1,38 @@
 #!/bin/bash -ex
 
+# EC2 - vt1.24xlarge
+
 function print_help {
   echo 'help me!!!'
 }
 
 function finish() {
   docker-compose down -v
-  docker network remove conjur_net || true
+  # docker network remove conjur_net || true
   rm admin_data || true
   rm data_key || true
 }
 
-function configure_master {
-  local source=$1
-  docker-compose exec $source bash -c "
-    evoke configure master \
-     --accept-eula \
-     --hostname $source \
-     --admin-password MySecretP@ss1 \
-     demo
-  "
-}
+# function configure_master {
+#   local source=$1
+#   docker-compose exec $source bash -c "
+#     evoke configure master \
+#      --accept-eula \
+#      --hostname $source \
+#      --admin-password MySecretP@ss1 \
+#      demo
+#   "
+# }
 
 trap finish EXIT
 
 function main {
   # docker network create conjur_net
-  docker network create \
-        --driver bridge \
-        --ipam-driver default \
-        --subnet 10.16.23.0/27 \
-        conjur_net
+  # docker network create \
+  #       --driver bridge \
+  #       --ipam-driver default \
+  #       --subnet 10.16.23.0/27 \
+  #       conjur_net
 
   if [ ! -f data_key ]; then
     docker-compose run --no-deps --rm conjur-leader data-key generate > data_key
@@ -38,18 +40,36 @@ function main {
 
   export CONJUR_DATA_KEY="$(< data_key)"
 
+  # docker-compose up -d --no-deps \
+  #   conjur-leader \
+  #   pg-leader \
+  #   pg-follower \
+  #   client
+
+  for i in {1..250} ; do
+    echo "i: $i"
+    docker-compose up -d --no-deps pg-follower-$i conjur-follower-$i
+    docker-compose exec -T conjur-follower-$i conjurctl wait
+    docker-compose stop conjur-follower-$i
+    sleep 1
+  done
+  exit
+
   docker-compose up -d --no-deps \
     conjur-leader \
-    pg-leader \
-    conjur-follower-1 \
-    pg-follower-1 \
-    client
+    pg-leader
+  #   pg-follower- \
+  #   client
+
+    # conjur-follower-1 \
 
   docker-compose exec -T conjur-leader conjurctl wait
 
   if [ ! -f admin_data ]; then
     docker-compose exec conjur-leader conjurctl account create default > admin_data
   fi
+
+  # bin/scale-to 10
 
   docker-compose run --rm dev-container /bin/ash
 }
