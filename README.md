@@ -9,25 +9,34 @@ To run the demo:
 bin/start
 ```
 
-This will start two DAP 11.7.0 running masters (on localhost ports `443` and `444`). The start script leaves you in a shell.
+This will start a Conjur instance with two Postgres instances (one as leader, one as partially replicating follower).
 
-#### Load Data
+The start script leaves you in a shell.
 
-To load sample data into the DAP source (`443`), run:
+#### Setup Partial Replication (with data)
 
-```sh
-rake syncer:load_data
-```
-
-This will load a number of applications and postgres database credentials into a `production` and `staging` policy spaces. 
-
-[Log in](https://localhost) to view the data.
-
-#### Migrate Data
-
-To migrate the `production` data to the source (`444`):
+To configure partial replication:
 
 ```sh
-rake syncer:replicate
+rake partial_replication:demo
 ```
-[Log in](https://localhost:444) to view the data.
+
+This will load data, the required policy, and configure Postgres to replicate
+
+#### Verify
+
+To verify partial replication worked as expected log onto each postgres container:
+
+- Leader: `psql postgres://postgres:Password123@localhost:5432/postgres`
+- Follower: `psql postgres://postgres:Password123@localhost:5433/postgres`
+
+and view secrets:
+
+```sql
+select * from secrets;
+```
+The follower should only include variables from the following:
+
+- `production/my-app-1`
+- `production/my-app-2`
+- `production/my-app-3`
