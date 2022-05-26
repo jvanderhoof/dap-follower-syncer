@@ -1,5 +1,5 @@
-# dap-follower-syncer
-This is Proof of Concept to demonstrate an API based mechanism for partial policy tree replication.
+# Partial Replication
+This is Proof of Concept to demonstrating Partial Replication using a mix of PGLogical and Conjur Policy.
 
 ## Demo
 To run the demo:
